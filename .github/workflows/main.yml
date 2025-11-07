@@ -9,34 +9,32 @@ jobs:
     timeout-minutes: 360
 
     steps:
+
       - name: 🧱 Enable RDP + Open Firewall
         run: |
-          # Enable RDP
+          # Enable Remote Desktop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          # Disable NLA
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name UserAuthentication -Value 0
-          # Set SecurityLayer = 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name SecurityLayer -Value 0
+          # Disable NLA (Network Level Auth)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
+          # Set security layer to 0 (RDP native)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 0
           
           # Open RDP port in Windows firewall
           netsh advfirewall firewall delete rule name="Open RDP" >$null 2>&1
           netsh advfirewall firewall add rule name="Open RDP" dir=in action=allow protocol=TCP localport=3389
-          
-          Restart-Service TermService
 
-      - name: 👤 Create RDP User with Admin Rights
+          # ✅ Fixed: Force-restart RDP service
+          Restart-Service TermService -Force
+
+      - name: 👤 Create RDP User with Random Admin Password
         run: |
           Add-Type -AssemblyName System.Web
           $chars = ([char[]]([char]'A'..[char]'Z') + [char[]]([char]'a'..[char]'z') + [char[]]([char]'0'..[char]'9') + "!@#$%^&*?".ToCharArray())
           $Password = -join ((1..16) | ForEach-Object { $chars | Get-Random })
-          $SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
-          
-          New-LocalUser -Name "RDP" -Password $SecurePassword -AccountNeverExpires -UserMayNotChangePassword
+          $SecurePass = ConvertTo-SecureString $Password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $SecurePass -AccountNeverExpires -UserMayNotChangePassword
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
           echo "RDP_PASSWORD=$Password" >> $env:GITHUB_ENV
 
       - name: 🌐 Install Tailscale
@@ -47,51 +45,50 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" -Wait
           Remove-Item $installer
 
-      - name: 🔐 Authenticate to Tailscale using Auth Key
+      - name: 🔐 Authenticate to Tailscale
         run: |
           $TailscaleExe = "C:\Program Files\Tailscale\tailscale.exe"
           $Hostname = "gh-runner-19158431421-1"
-          
-          # Connect to tailscale with fixed hostname
+
           & "$TailscaleExe" up --authkey "${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname $Hostname
-          
-          # Get Tailscale IPv4
-          $ip = ""
+
+          # Wait for Tailscale IPv4 to become available
+          $ip = ''
           $retries = 0
-          while (-not $ip -and $retries -lt 10) {
+          while ([string]::IsNullOrWhiteSpace($ip) -and $retries -lt 10) {
               $ip = & "$TailscaleExe" ip -4
-              Start-Sleep -Seconds 3
+              Start-Sleep -Seconds 5
               $retries++
           }
-          
+
           if (-not $ip) {
-              Write-Error "❌ Failed to get Tailscale IP"
+              Write-Error "❌ Could not retrieve Tailscale IP"
               exit 1
           }
-          
+
           echo "TS_IP=$ip" >> $env:GITHUB_ENV
 
-      - name: 🧪 Test RDP Access
+      - name: 🧪 Verify RDP is Accessible via Tailscale
         run: |
-          $result = Test-NetConnection -ComputerName $env:TS_IP -Port 3389
-          if (-not $result.TcpTestSucceeded) {
-              Write-Error "❌ RDP not reachable via Tailscale"
+          $test = Test-NetConnection -ComputerName $env:TS_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "❌ Failed to reach RDP port 3389 via Tailscale"
               exit 1
           }
-          Write-Host "✅ RDP accessible"
 
-      - name: 🟢 Show Credentials & Keep VM Alive
+      - name: 🎯 Display RDP Info and Keep Workflow Running
         run: |
-          Write-Host "`n🔐 RDP connection is ready"
-          Write-Host "-----------------------------------------"
+          Write-Host ""
+          Write-Host "✅ RDP Session is Ready!"
+          Write-Host "----------------------------------------------------"
           Write-Host "🌐 Tailscale IP : $env:TS_IP"
-          Write-Host "🖥️ Hostname     : gh-runner-19158431421-1.ts.net"
+          Write-Host "🔸 Hostname     : gh-runner-19158431421-1.ts.net"
           Write-Host "👤 Username     : RDP"
-          Write-Host "🔑 Password     : $env:RDP_PASSWORD"
-          Write-Host "🛑 End session  : Cancel the workflow manually"
-          Write-Host "-----------------------------------------`n"
+          Write-Host "🔐 Password     : $env:RDP_PASSWORD"
+          Write-Host "🛑 End session  : Cancel this workflow manually"
+          Write-Host "----------------------------------------------------`n"
 
           while ($true) {
               Start-Sleep -Seconds 300
-              Write-Host "[$(Get-Date)] 🟢 Session alive. Cancel to terminate."
+              Write-Host "[$(Get-Date)] 🟢 Still running... Cancel to exit."
           }
